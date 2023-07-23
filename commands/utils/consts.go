@@ -8,15 +8,26 @@ const (
 	baseResourceUrl = "https://raw.githubusercontent.com/jfrog/frogbot/master/resources/"
 
 	// Errors
-	errUnsupportedMultiRepo = "multi repository configuration isn't supported. only one repository configuration is allowed"
+	errUnsupportedMultiRepo        = "multi repository configuration isn't supported. Only one repository configuration is allowed"
+	ErrScanPullRequestSameBranches = "scan pull request command triggered on the same branch: %s, Please check your configuration"
 
 	// Images
-	NoVulnerabilityBannerSource ImageSource = "noVulnerabilityBanner.png"
-	VulnerabilitiesBannerSource ImageSource = "vulnerabilitiesBanner.png"
-	criticalSeveritySource      ImageSource = "criticalSeverity.png"
-	highSeveritySource          ImageSource = "highSeverity.png"
-	mediumSeveritySource        ImageSource = "mediumSeverity.png"
-	lowSeveritySource           ImageSource = "lowSeverity.png"
+	NoVulnerabilityPrBannerSource       ImageSource = "v2/noVulnerabilityBannerPR.png"
+	NoVulnerabilityMrBannerSource       ImageSource = "v2/noVulnerabilityBannerMR.png"
+	VulnerabilitiesPrBannerSource       ImageSource = "v2/vulnerabilitiesBannerPR.png"
+	VulnerabilitiesMrBannerSource       ImageSource = "v2/vulnerabilitiesBannerMR.png"
+	VulnerabilitiesFixPrBannerSource    ImageSource = "v2/vulnerabilitiesFixBannerPR.png"
+	VulnerabilitiesFixMrBannerSource    ImageSource = "v2/vulnerabilitiesFixBannerMR.png"
+	criticalSeveritySource              ImageSource = "v2/applicableCriticalSeverity.png"
+	notApplicableCriticalSeveritySource ImageSource = "v2/notApplicableCritical.png"
+	highSeveritySource                  ImageSource = "v2/applicableHighSeverity.png"
+	notApplicableHighSeveritySource     ImageSource = "v2/notApplicableHigh.png"
+	mediumSeveritySource                ImageSource = "v2/applicableMediumSeverity.png"
+	notApplicableMediumSeveritySource   ImageSource = "v2/notApplicableMedium.png"
+	lowSeveritySource                   ImageSource = "v2/applicableLowSeverity.png"
+	notApplicableLowSeveritySource      ImageSource = "v2/notApplicableLow.png"
+	unknownSeveritySource               ImageSource = "v2/applicableUnknownSeverity.png"
+	notApplicableUnknownSeveritySource  ImageSource = "v2/notApplicableUnknown.png"
 
 	// VCS providers params
 	GitHub          vcsProvider = "github"
@@ -43,6 +54,11 @@ const (
 	GitProjectEnv   = "JF_GIT_PROJECT"
 	GitUsernameEnv  = "JF_GIT_USERNAME"
 
+	// Git naming template environment variables
+	BranchNameTemplateEnv       = "JF_BRANCH_NAME_TEMPLATE"
+	CommitMessageTemplateEnv    = "JF_COMMIT_MESSAGE_TEMPLATE"
+	PullRequestTitleTemplateEnv = "JF_PULL_REQUEST_TITLE_TEMPLATE"
+
 	// Repository environment variables - Ignored if the frogbot-config.yml file is used
 	InstallCommandEnv            = "JF_INSTALL_DEPS_CMD"
 	RequirementsFileEnv          = "JF_REQUIREMENTS_FILE"
@@ -53,19 +69,23 @@ const (
 	FailOnSecurityIssuesEnv      = "JF_FAIL"
 	UseWrapperEnv                = "JF_USE_WRAPPER"
 	DepsRepoEnv                  = "JF_DEPS_REPO"
+	MinSeverityEnv               = "JF_MIN_SEVERITY"
+	FixableOnlyEnv               = "JF_FIXABLE_ONLY"
 	WatchesDelimiter             = ","
 
 	//#nosec G101 -- False positive - no hardcoded credentials.
-	GitTokenEnv         = "JF_GIT_TOKEN"
-	GitBaseBranchEnv    = "JF_GIT_BASE_BRANCH"
-	GitPullRequestIDEnv = "JF_GIT_PULL_REQUEST_ID"
-	GitApiEndpointEnv   = "JF_GIT_API_ENDPOINT"
+	GitTokenEnv          = "JF_GIT_TOKEN"
+	GitBaseBranchEnv     = "JF_GIT_BASE_BRANCH"
+	GitPullRequestIDEnv  = "JF_GIT_PULL_REQUEST_ID"
+	GitApiEndpointEnv    = "JF_GIT_API_ENDPOINT"
+	GitAggregateFixesEnv = "JF_GIT_AGGREGATE_FIXES"
+	GitEmailAuthorEnv    = "JF_GIT_EMAIL_AUTHOR"
 
 	// Comment
-	tableHeader = "\n| SEVERITY | DIRECT DEPENDENCIES | DIRECT DEPENDENCIES VERSIONS | IMPACTED DEPENDENCY NAME | IMPACTED DEPENDENCY VERSION | FIXED VERSIONS | CVE\n" +
-		":--: | -- | -- | -- | -- | :--: | --"
-	simplifiedTableHeader = "\n| SEVERITY | DIRECT DEPENDENCIES | IMPACTED DEPENDENCY NAME | IMPACTED DEPENDENCY VERSION | FIXED VERSIONS | CVE\n" + ":--: | -- | -- | -- | :--: | --"
-	WhatIsFrogbotMd       = "\n\n[What is Frogbot?](https://github.com/jfrog/frogbot#readme)\n"
+	vulnerabilitiesTableHeader        = "\n| SEVERITY                | DIRECT DEPENDENCIES                  | IMPACTED DEPENDENCY                   | FIXED VERSIONS                       |\n| :---------------------: | :----------------------------------: | :-----------------------------------: | :---------------------------------: |"
+	vulnerabilitiesTableHeaderWithJas = "| SEVERITY                | CONTEXTUAL ANALYSIS                  | DIRECT DEPENDENCIES                  | IMPACTED DEPENDENCY                   | FIXED VERSIONS                       |\n| :---------------------: | :----------------------------------: | :----------------------------------: | :-----------------------------------: | :---------------------------------: |"
+	iacTableHeader                    = "\n| SEVERITY                | FILE                  | LINE:COLUMN                   | FINDING                       |\n| :---------------------: | :----------------------------------: | :-----------------------------------: | :---------------------------------: |"
+	CommentGeneratedByFrogbot         = "[JFrog Frogbot](https://github.com/jfrog/frogbot#readme)"
 
 	// Product ID for usage reporting
 	productId = "frogbot"
@@ -73,12 +93,25 @@ const (
 	// The 'GITHUB_ACTIONS' environment variable exists when the CI is GitHub Actions
 	GitHubActionsEnv = "GITHUB_ACTIONS"
 
-	// When Frogbot periodically scans repositories, it skips scanning repositories for which the latest commit has already been scanned,
-	// unless the latest commit has been scanned more then 'SkipRepoScanDays' days ago.
-	SkipRepoScanDays = 4
+	// Placeholders for templates
+	PackagePlaceHolder    = "${IMPACTED_PACKAGE}"
+	FixVersionPlaceHolder = "${FIX_VERSION}"
+	BranchHashPlaceHolder = "${BRANCH_NAME_HASH}"
 
-	// Used by Frogbot to create new commits statuses and recognize its own statuses.
-	CommitStatusDescription = "Scanned by Frogbot"
-	CommitStatusDetailsUrl  = "https://github.com/jfrog/frogbot#readme"
-	FrogbotCreatorName      = "Frogbot"
+	// Default naming templates
+	BranchNameTemplate            = "frogbot-" + PackagePlaceHolder + "-" + BranchHashPlaceHolder
+	AggregatedBranchNameTemplate  = "frogbot-update-" + BranchHashPlaceHolder + "-dependencies"
+	CommitMessageTemplate         = "Upgrade " + PackagePlaceHolder + " to " + FixVersionPlaceHolder
+	FrogbotPullRequestTitlePrefix = "[🐸 Frogbot]"
+	PullRequestTitleTemplate      = FrogbotPullRequestTitlePrefix + " Update version of " + PackagePlaceHolder + " to " + FixVersionPlaceHolder
+	// Frogbot Git author details showed in commits
+	frogbotAuthorName  = "JFrog-Frogbot"
+	frogbotAuthorEmail = "eco-system+frogbot@jfrog.com"
+)
+
+type UnsupportedErrorType string
+
+const (
+	IndirectDependencyFixNotSupported   UnsupportedErrorType = "IndirectDependencyFixNotSupported"
+	BuildToolsDependencyFixNotSupported UnsupportedErrorType = "BuildToolsDependencyFixNotSupported"
 )

@@ -46,6 +46,8 @@ function main() {
                     yield utils_1.Utils.execScanPullRequest();
                     break;
                 case "push":
+                case "schedule":
+                case "workflow_dispatch":
                     yield utils_1.Utils.execCreateFixPullRequests();
                     break;
                 default:

@@ -12,6 +12,8 @@ async function main() {
                 await Utils.execScanPullRequest();
                 break;
             case "push":
+            case "schedule":
+            case "workflow_dispatch":
                 await Utils.execCreateFixPullRequests();
                 break;
             default:

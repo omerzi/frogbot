@@ -43,6 +43,43 @@
           "examples": ["master", "v1", "v2"]
         },
         "examples": [["master", "v1", "v2"]]
+      },
+      "commitMessageTemplate": {
+        "type": "string",
+        "default": "",
+        "examples": [
+          "[Frogbot]",
+          "fix(dependency) update ${IMPACTED_PACKAGE} to ${FIX_VERSION}"
+        ]
+      },
+      "branchNameTemplate": {
+        "type": "string",
+        "default": "",
+        "examples": [
+          "Frogbot-${BRANCH_NAME_HASH}",
+          "Security_Update-${BRANCH_NAME_HASH}",
+          "${BRANCH_NAME_HASH}-Feature"
+        ]
+      },
+      "pullRequestTitleTemplate": {
+        "type": "string",
+        "default": "",
+        "examples": [
+          "[Frogbot]-${IMPACTED_PACKAGE}",
+          "[Security_Update]-${FIX_VERSION}",
+          "[Feature]"
+        ]
+      },
+      "aggregateFixes": {
+        "type": "boolean",
+        "default": "false"
+      },
+      "emailAuthor": {
+        "type": "string",
+        "default": "eco-system+frogbot@jfrog.com",
+        "examples": [
+          "myemail@jfrog.com"
+        ]
       }
     },
     "examples": [
@@ -67,6 +104,19 @@
         "description": "Set to true to fail the job if security issues were found.",
         "title": "Fail on Security Issues"
       },
+      "minSeverity": {
+        "type": "string",
+        "default": ["Show all severities"],
+        "description": "Set the minimum severity for vulnerabilities that should be fixed and commented on in pull requests.",
+        "title": "Minimum vulnerability severity to filter",
+        "examples": ["low, medium, high, critical"]
+      },
+      "fixableOnly": {
+        "type": "boolean",
+        "default": ["false"],
+        "description": "Handle vulnerabilities with fix versions only.",
+        "title": "Handle vulnerabilities with fix versions only"
+      },
       "projects": {
         "type": ["array", "null"],
         "title": "Projects in Git Repository",
@@ -78,7 +128,7 @@
               "type": "string",
               "title": "Install Command",
               "description": "An installation command to run to resolve the project dependencies.",
-              "examples": ["npm i", "nuget restore", "dotnet restore"]
+              "examples": ["nuget restore", "dotnet restore"]
             },
             "workingDirs": {
               "type": "array",

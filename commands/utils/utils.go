@@ -8,31 +8,113 @@ import (
 	"fmt"
 	"github.com/jfrog/froggit-go/vcsclient"
 	"github.com/jfrog/froggit-go/vcsutils"
+	"github.com/jfrog/gofrog/version"
 	"github.com/jfrog/jfrog-cli-core/v2/artifactory/utils"
+	"github.com/jfrog/jfrog-cli-core/v2/common/commands"
 	"github.com/jfrog/jfrog-cli-core/v2/utils/config"
+	"github.com/jfrog/jfrog-cli-core/v2/utils/coreutils"
+	audit "github.com/jfrog/jfrog-cli-core/v2/xray/commands/audit/generic"
 	"github.com/jfrog/jfrog-cli-core/v2/xray/formats"
 	xrayutils "github.com/jfrog/jfrog-cli-core/v2/xray/utils"
 	"github.com/jfrog/jfrog-client-go/artifactory/usage"
 	"github.com/jfrog/jfrog-client-go/utils/io/fileutils"
 	"github.com/jfrog/jfrog-client-go/utils/log"
-	"github.com/jfrog/jfrog-client-go/xray/services"
 	"os"
+	"regexp"
+	"sort"
 	"strings"
 )
 
-const RootDir = "."
+const (
+	RootDir         = "."
+	branchNameRegex = `[~^:?\\\[\]@{}*]`
+
+	// Branch validation error messages
+	branchInvalidChars             = "branch name cannot contain the following chars  ~, ^, :, ?, *, [, ], @, {, }"
+	branchInvalidPrefix            = "branch name cannot start with '-' "
+	branchCharsMaxLength           = 255
+	branchInvalidLength            = "branch name length exceeded " + string(rune(branchCharsMaxLength)) + " chars"
+	invalidBranchTemplate          = "branch template must contain " + BranchHashPlaceHolder + " placeholder "
+	skipIndirectVulnerabilitiesMsg = "\n%s is an indirect dependency that will not be updated to version %s.\nFixing indirect dependencies can potentially cause conflicts with other dependencies that depend on the previous version.\nFrogbot skips this to avoid potential incompatibilities and breaking changes."
+	skipBuildToolDependencyMsg     = "Skipping vulnerable package %s since it is not defined in your package descriptor file. " +
+		"Update %s version to %s to fix this vulnerability."
+	JfrogHomeDirEnv = "JFROG_CLI_HOME_DIR"
+)
 
 var (
-	TrueVal        = true
-	FrogbotVersion = "0.0.0"
+	TrueVal                 = true
+	FrogbotVersion          = "0.0.0"
+	branchInvalidCharsRegex = regexp.MustCompile(branchNameRegex)
 )
+
+var BuildToolsDependenciesMap = map[coreutils.Technology][]string{
+	coreutils.Go:  {"github.com/golang/go"},
+	coreutils.Pip: {"pip", "setuptools", "wheel"},
+}
+
+type ErrUnsupportedFix struct {
+	PackageName  string
+	FixedVersion string
+	ErrorType    UnsupportedErrorType
+}
+
+// Custom error for unsupported fixes
+// Currently we hold two unsupported reasons, indirect and build tools dependencies.
+func (err *ErrUnsupportedFix) Error() string {
+	if err.ErrorType == IndirectDependencyFixNotSupported {
+		return fmt.Sprintf(skipIndirectVulnerabilitiesMsg, err.PackageName, err.FixedVersion)
+	}
+	return fmt.Sprintf(skipBuildToolDependencyMsg, err.PackageName, err.PackageName, err.FixedVersion)
+}
+
+// VulnerabilityDetails serves as a container for essential information regarding a vulnerability that is going to be addressed and resolved
+type VulnerabilityDetails struct {
+	*formats.VulnerabilityOrViolationRow
+	// Suggested fix version
+	SuggestedFixedVersion string
+	// States whether the dependency is direct or transitive
+	IsDirectDependency bool
+	// Cves as a list of string
+	Cves []string
+}
+
+func NewVulnerabilityDetails(vulnerability *formats.VulnerabilityOrViolationRow, fixVersion string) *VulnerabilityDetails {
+	vulnDetails := &VulnerabilityDetails{
+		VulnerabilityOrViolationRow: vulnerability,
+		SuggestedFixedVersion:       fixVersion,
+	}
+	vulnDetails.SetCves(vulnerability.Cves)
+	return vulnDetails
+}
+
+func (vd *VulnerabilityDetails) SetIsDirectDependency(isDirectDependency bool) {
+	vd.IsDirectDependency = isDirectDependency
+}
+
+func (vd *VulnerabilityDetails) SetCves(cves []formats.CveRow) {
+	for _, cve := range cves {
+		vd.Cves = append(vd.Cves, cve.Id)
+	}
+}
+
+func (vd *VulnerabilityDetails) UpdateFixVersionIfMax(fixVersion string) {
+	// Update vd.FixVersion as the maximum version if found a new version that is greater than the previous maximum version.
+	if vd.SuggestedFixedVersion == "" || version.NewVersion(vd.SuggestedFixedVersion).Compare(fixVersion) > 0 {
+		vd.SuggestedFixedVersion = fixVersion
+	}
+}
 
 type ErrMissingEnv struct {
 	VariableName string
 }
 
-func (m *ErrMissingEnv) Error() string {
-	return fmt.Sprintf("'%s' environment variable is missing", m.VariableName)
+func (e *ErrMissingEnv) Error() string {
+	return fmt.Sprintf("'%s' environment variable is missing", e.VariableName)
+}
+
+// IsMissingEnvErr returns true if err is a type of ErrMissingEnv, otherwise false
+func (e *ErrMissingEnv) IsMissingEnvErr(err error) bool {
+	return errors.As(err, &e)
 }
 
 type ErrMissingConfig struct {
@@ -43,33 +125,13 @@ func (e *ErrMissingConfig) Error() string {
 	return fmt.Sprintf("config file is missing: %s", e.missingReason)
 }
 
-type ScanDetails struct {
-	services.XrayGraphScanParams
-	Project
-	*config.ServerDetails
-	*Git
-	Client                   vcsclient.VcsClient
-	FailOnInstallationErrors bool
-	Branch                   string
-}
-
-// The OutputWriter interface allows Frogbot output to be written in an appropriate way for each git provider.
-// Some git providers support markdown only partially, whereas others support it fully.
-type OutputWriter interface {
-	TableRow(vulnerability formats.VulnerabilityOrViolationRow) string
-	NoVulnerabilitiesTitle() string
-	VulnerabiltiesTitle() string
-	TableHeader() string
-	IsFrogbotResultComment(comment string) bool
-}
-
 func Chdir(dir string) (cbk func() error, err error) {
 	wd, err := os.Getwd()
 	if err != nil {
 		return nil, err
 	}
 	if err = os.Chdir(dir); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("could not change dir to: %s\n%s", dir, err.Error())
 	}
 	return func() error { return os.Chdir(wd) }, err
 }
@@ -108,14 +170,31 @@ func Md5Hash(values ...string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
+// Generates MD5Hash from a vulnerabilityDetails
+// The map can be returned in different order from Xray, so we need to sort the strings before hashing.
+func VulnerabilityDetailsToMD5Hash(vulnerabilities ...*VulnerabilityDetails) (string, error) {
+	hash := crypto.MD5.New()
+	var keys []string
+	for _, vuln := range vulnerabilities {
+		keys = append(keys, GetUniqueID(*vuln.VulnerabilityOrViolationRow))
+	}
+	sort.Strings(keys)
+	for key, value := range keys {
+		if _, err := fmt.Fprint(hash, key, value); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
 // UploadScanToGitProvider uploads scan results to the relevant git provider in order to view the scan in the Git provider code scanning UI
-func UploadScanToGitProvider(scanResults []services.ScanResponse, repo *FrogbotRepoConfig, branch string, client vcsclient.VcsClient, isMultipleRoots bool) error {
+func UploadScanToGitProvider(scanResults *audit.Results, repo *Repository, branch string, client vcsclient.VcsClient) error {
 	if repo.GitProvider.String() != vcsutils.GitHub.String() {
 		log.Debug("Upload Scan to " + repo.GitProvider.String() + " is currently unsupported.")
 		return nil
 	}
 
-	scan, err := xrayutils.GenerateSarifFileFromScan(scanResults, isMultipleRoots, true)
+	scan, err := xrayutils.GenerateSarifFileFromScan(scanResults.ExtendedScanResults, scanResults.IsMultipleRootProject, true, "JFrog Frogbot", "https://github.com/jfrog/frogbot")
 	if err != nil {
 		return err
 	}
@@ -123,7 +202,7 @@ func UploadScanToGitProvider(scanResults []services.ScanResponse, repo *FrogbotR
 	if err != nil {
 		return fmt.Errorf("upload code scanning for %s branch failed with: %s", branch, err.Error())
 	}
-
+	log.Info("The complete scanning results have been uploaded to your Code Scanning alerts view")
 	return err
 }
 
@@ -144,7 +223,7 @@ func DownloadRepoToTempDir(client vcsclient.VcsClient, branch string, git *Git) 
 	return
 }
 
-func ValidateSingleRepoConfiguration(configAggregator *FrogbotConfigAggregator) error {
+func ValidateSingleRepoConfiguration(configAggregator *RepoAggregator) error {
 	// Multi repository configuration is supported only in the scanpullrequests and scanandfixrepos commands.
 	if len(*configAggregator) > 1 {
 		return errors.New(errUnsupportedMultiRepo)
@@ -162,9 +241,53 @@ func GetRelativeWd(fullPathWd, baseWd string) string {
 	return strings.TrimPrefix(fullPathWd, baseWd+string(os.PathSeparator))
 }
 
-func GetCompatibleOutputWriter(provider vcsutils.VcsProvider) OutputWriter {
-	if provider == vcsutils.BitbucketServer {
-		return &SimplifiedOutput{}
+// The impact graph of direct dependencies consists of only two elements.
+func IsDirectDependency(impactPath [][]formats.ComponentRow) (bool, error) {
+	if len(impactPath) == 0 {
+		return false, fmt.Errorf("invalid impact path provided")
 	}
-	return &StandardOutput{}
+	return len(impactPath[0]) < 3, nil
+}
+
+func validateBranchName(branchName string) error {
+	// Default is "" which will be replaced with default template
+	if len(branchName) == 0 {
+		return nil
+	}
+	branchNameWithoutPlaceHolders := formatStringWithPlaceHolders(branchName, "", "", "", true)
+	if branchInvalidCharsRegex.MatchString(branchNameWithoutPlaceHolders) {
+		return fmt.Errorf(branchInvalidChars)
+	}
+	// Prefix cannot be '-'
+	if branchName[0] == '-' {
+		return fmt.Errorf(branchInvalidPrefix)
+	}
+	if len(branchName) > branchCharsMaxLength {
+		return fmt.Errorf(branchInvalidLength)
+	}
+	if !strings.Contains(branchName, BranchHashPlaceHolder) {
+		return fmt.Errorf(invalidBranchTemplate)
+	}
+	return nil
+}
+
+func BuildServerConfigFile(server *config.ServerDetails) (previousJFrogHomeDir, currentJFrogHomeDir string, err error) {
+	// Create temp dir to store server config inside
+	currentJFrogHomeDir, err = fileutils.CreateTempDir()
+	if err != nil {
+		return
+	}
+	// Save current JFrog Home dir
+	previousJFrogHomeDir = os.Getenv(JfrogHomeDirEnv)
+	// Set the temp dir as the JFrog Home dir
+	if err = os.Setenv(JfrogHomeDirEnv, currentJFrogHomeDir); err != nil {
+		return
+	}
+	cc := commands.NewConfigCommand(commands.AddOrEdit, "frogbot").SetDetails(server)
+	err = cc.Run()
+	return
+}
+
+func GetUniqueID(vulnerability formats.VulnerabilityOrViolationRow) string {
+	return vulnerability.ImpactedDependencyName + vulnerability.ImpactedDependencyVersion + vulnerability.IssueId
 }

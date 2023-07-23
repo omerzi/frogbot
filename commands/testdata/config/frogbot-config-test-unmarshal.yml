@@ -4,9 +4,10 @@
       branches:
         - master
         - main
+      emailAuthor: "myemail@jfrog.com"
     scan:
       projects:
-        - installCommand: npm i
+        - installCommand: nuget restore
           useWrapper: false
           repository: test-repo
       failOnSecurityIssues: false
